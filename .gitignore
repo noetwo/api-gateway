@@ -1,6 +1,11 @@
 config.json
 config.json.*
+.env
+.env.*
+!.env.example
 stats.json
 logs/
 *.bak*
+*.pem
+*.key
 node_modules/

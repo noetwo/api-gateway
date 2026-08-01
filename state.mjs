@@ -36,6 +36,7 @@ if (!stats.upstreamKeyUsage || typeof stats.upstreamKeyUsage !== 'object') stats
 if (!stats.clientKeyUsage || typeof stats.clientKeyUsage !== 'object') stats.clientKeyUsage = {};
 
 const UI_FILE = path.resolve(import.meta.dirname, 'ui.html');
+const LOGIN_FILE = path.resolve(import.meta.dirname, 'login.html');
 const SERVE_UI = fs.existsSync(UI_FILE);
 
 const LEGACY_MODEL_ALIASES = new Map([
@@ -67,6 +68,7 @@ export {
   channelKeyCursors,
   STATS_FILE,
   UI_FILE,
+  LOGIN_FILE,
   SERVE_UI,
   LEGACY_MODEL_ALIASES,
   modelMap,

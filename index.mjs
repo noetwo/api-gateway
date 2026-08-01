@@ -1,17 +1,22 @@
 import http from 'node:http';
 import fs from 'node:fs';
-import { config, modelMap, stats, SERVE_UI, UI_FILE } from './state.mjs';
+import { config, modelMap, stats, SERVE_UI, UI_FILE, LOGIN_FILE } from './state.mjs';
 import {
   writeGatewayLog, newRequestId, saveStats,
   backfillHourlyStatsFromRecentLogs, backfillUsageCacheFromRecentLogs,
   backfillUpstreamKeyUsageFromRecentLogs,
 } from './logger.mjs';
 import { rebuildModelMap } from './config.mjs';
-import { adminAuth, clientAuth } from './auth.mjs';
+import {
+  adminAuth, clientAuth,
+  isAdminRequestAuthenticated, handleAdminLogin, handleAdminLogout,
+} from './auth.mjs';
 import {
   handleChatCompletions, handleModels, handleConfigAPI,
   handleResponses, handleAnthropicMessages,
 } from './handlers.mjs';
+
+const LISTEN_HOST = String(process.env.GATEWAY_HOST || config.host || '127.0.0.1').trim();
 
 // 初始化
 rebuildModelMap();
@@ -44,8 +49,16 @@ const server = http.createServer(async (req, res) => {
 
   // Web UI
   if (SERVE_UI && (url === '/' || url === '/ui')) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(fs.readFileSync(UI_FILE, 'utf-8'));
+    const authenticated = isAdminRequestAuthenticated(req);
+    const pageFile = authenticated ? UI_FILE : LOGIN_FILE;
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      'Pragma': 'no-cache',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'same-origin',
+    });
+    res.end(fs.readFileSync(pageFile, 'utf-8'));
     return;
   }
 
@@ -72,8 +85,19 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  if (url === '/api/login' && req.method === 'POST') {
+    handleAdminLogin(req, res, body);
+    return;
+  }
+
+  if (url === '/api/logout' && req.method === 'POST') {
+    handleAdminLogout(req, res);
+    return;
+  }
+
   // Route
   if (url.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store');
     if (!adminAuth(req, res)) return;
     const handled = await handleConfigAPI(req, res, url, req.method === 'POST' ? body : '');
     if (!handled) {
@@ -116,11 +140,12 @@ process.on('SIGTERM', () => {
   process.exit();
 });
 
-server.listen(config.port, '127.0.0.1', () => {
+server.listen(config.port, LISTEN_HOST, () => {
   console.log(`========================================`);
   console.log(`聚合渠道 (API Gateway) v2.0`);
   console.log(`========================================`);
   console.log(`端口: ${config.port}`);
+  console.log(`监听地址: ${LISTEN_HOST}`);
   console.log(`渠道数: ${Object.keys(config.channels).length}`);
   console.log(`模型总数: ${[...modelMap.keys()].length}`);
   console.log(`统计功能: 已启用`);

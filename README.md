@@ -2,6 +2,8 @@
 
 OpenAI-compatible aggregate API gateway with a WebUI for channels, models, logs, stats, key rotation, and Pioneer billing status.
 
+Requires Node.js 22 or newer. Node.js 24 LTS is recommended.
+
 ## Three Steps
 
 ```bash
@@ -10,6 +12,8 @@ cd api-gateway
 sh start.sh
 ```
 
+For Node.js panels such as 1Panel, use `npm start` as the startup command. This project has no third-party npm dependencies.
+
 After startup, the terminal prints the WebUI address:
 
 ```text
@@ -17,13 +21,13 @@ WebUI: http://127.0.0.1:8300
 API:   http://127.0.0.1:8300/v1
 ```
 
-Open the WebUI and enter the initial management key:
+Open the WebUI and enter the management key configured in `config.json`:
 
 ```text
-123456
+replace-with-management-key
 ```
 
-Then edit channels, upstream API keys, and change the management key in the WebUI.
+Then edit channels, upstream API keys, and change both keys in the WebUI before exposing it publicly.
 
 ## Termux
 
@@ -69,7 +73,9 @@ Each channel can use either a single upstream key or a key pool. Keep `key` for 
 
 The WebUI channel editor exposes this as the upstream key pool. The selected upstream key is logged only as a short fingerprint.
 
-The management key `api_key` can access both the WebUI and `/v1`. You can also generate extra client keys from the WebUI; generated keys are stored in `api_keys` and can call `/v1/*` but cannot access `/api/*` management routes.
+The management key `admin_key` can access only the WebUI management API under `/api/*`. The primary client key `api_key` and generated keys in `api_keys` can call `/v1/*`, but cannot access management routes. `admin_key` and `api_key` must be different.
+
+The WebUI never stores `admin_key` in browser storage. A successful login creates a 12-hour `HttpOnly`, `SameSite=Strict` session cookie; restarting the gateway, changing the management key, or clicking **退出管理** invalidates the session.
 
 ## Pioneer Billing Status
 
@@ -134,7 +140,9 @@ Important fields:
 ```json
 {
   "port": 8300,
-  "api_key": "123456",
+  "host": "127.0.0.1",
+  "admin_key": "replace-with-management-key",
+  "api_key": "replace-with-gateway-api-key",
   "api_keys": ["client-key-1"],
   "channels": {
     "anthropic": {
@@ -164,10 +172,12 @@ Important fields:
 }
 ```
 
-Use `api_key` as the Bearer token for clients:
+Use `admin_key` to open and manage the WebUI. Use `api_key` as the Bearer token for model clients:
 
 ```text
-Authorization: Bearer 123456
+Authorization: Bearer replace-with-gateway-api-key
 ```
 
-Change this key from the WebUI after first login.
+Change both keys from the WebUI after first login. For public use, put the gateway behind an HTTPS reverse proxy; the Node.js service listens on `127.0.0.1` by default.
+
+When running inside Docker with a published port, set `host` to `0.0.0.0`. Keep the published host port bound to `127.0.0.1` when an OpenResty or Nginx reverse proxy is used.

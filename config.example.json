@@ -1,5 +1,7 @@
 {
   "port": 8300,
+  "host": "127.0.0.1",
+  "admin_key": "replace-with-management-key",
   "api_key": "replace-with-gateway-api-key",
   "api_keys": [],
   "channels": {

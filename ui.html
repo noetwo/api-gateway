@@ -2065,7 +2065,8 @@
           <button class="btn btn-outline btn-sm" onclick="exportBackup()">导出备份</button>
           <button class="btn btn-outline btn-sm" onclick="importBackup()">导入备份</button>
           <button class="btn btn-primary btn-sm" onclick="showClientKeysModal()">🔐 调用 Key</button>
-          <button class="btn btn-outline btn-sm" onclick="showApiKeyModal()">修改管理 Key</button>
+          <button class="btn btn-outline btn-sm" onclick="showAdminKeyModal()">修改管理 Key</button>
+          <button class="btn btn-outline btn-sm" onclick="logoutAdmin()">退出管理</button>
         </div>
       </div>
       <div class="channel-filter" id="channelFilter"></div>
@@ -2189,18 +2190,9 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    const KEY_STORAGE = 'apiGatewayKey';
-    let KEY = localStorage.getItem(KEY_STORAGE) || '';
     function isSafeHeaderValue(value = '') {
       return /^[\x21-\x7E]+$/.test(String(value));
     }
-
-    function promptForAdminKey() {
-      // 管理 Key 已移除：管理面板由 Nginx 通用登录保护，无需再输入 Key。
-      document.getElementById('apiKeyLabel').textContent = '通用登录';
-      return true;
-    }
-    if (!KEY) promptForAdminKey();
     const HOST = location.hostname || '170.106.64.129';
     function getApiDisplayUrl() {
       if (location.protocol === 'https:') return `${location.origin}/v1`;
@@ -2208,7 +2200,7 @@
       return `http://${HOST}:${port}/v1`;
     }
     document.getElementById('apiUrl').textContent = getApiDisplayUrl();
-    document.getElementById('apiKeyLabel').textContent = KEY ? '已保存在本浏览器' : '未设置';
+    document.getElementById('apiKeyLabel').textContent = '已登录';
 
     let channels = {};
     let websiteButtons = [];
@@ -2372,39 +2364,77 @@
       } catch (e) { toast('保存失败: ' + e.message, false); }
     }
 
-    function showApiKeyModal() {
+    function showAdminKeyModal() {
       document.getElementById('modalContent').innerHTML = `
     <h3>修改管理 Key</h3>
     <label>新的管理 Key</label>
-    <input id="newApiKey" type="password" placeholder="至少 4 位" autocomplete="new-password">
-    <div class="hint">保存后会写入 config.json，并自动更新当前浏览器保存的 Key</div>
+    <input id="newAdminKey" type="password" placeholder="至少 8 位，建议使用随机长 Key" autocomplete="new-password">
+    <div class="hint">仅用于管理页面和 /api/*，不能调用 /v1/*。保存后会更新当前会话。</div>
     <div class="actions">
       <button class="btn btn-outline" onclick="closeModal()">取消</button>
-      <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
+      <button class="btn btn-primary" onclick="saveAdminKey()">保存</button>
     </div>`;
       document.getElementById('modal').classList.add('active');
-      setTimeout(() => document.getElementById('newApiKey')?.focus(), 0);
+      setTimeout(() => document.getElementById('newAdminKey')?.focus(), 0);
     }
 
-    async function saveApiKey() {
-      const nextKey = document.getElementById('newApiKey').value.trim();
-      if (nextKey.length < 4) { toast('管理 Key 至少 4 位', false); return; }
+    async function saveAdminKey() {
+      const nextKey = document.getElementById('newAdminKey').value.trim();
+      if (nextKey.length < 8) { toast('管理 Key 至少 8 位', false); return; }
+      if (!isSafeHeaderValue(nextKey)) { toast('管理 Key 包含非法字符', false); return; }
       try {
-        const res = await api('/api/config/api-key', {
+        const res = await api('/api/config/admin-key', {
           method: 'POST',
-          body: JSON.stringify({ api_key: nextKey })
+          body: JSON.stringify({ admin_key: nextKey })
         });
         if (res.ok) {
-          KEY = nextKey;
-          localStorage.setItem(KEY_STORAGE, KEY);
-          document.getElementById('apiKeyLabel').textContent = '已保存在本浏览器';
-          toast('管理 Key 已修改');
-          closeModal();
+          alert('管理 Key 已修改，请使用新 Key 重新登录。');
+          location.replace('/');
         } else {
           toast(res.error || '修改失败', false);
         }
       } catch (e) {
         toast('修改失败: ' + e.message, false);
+      }
+    }
+
+    function showPrimaryApiKeyModal() {
+      document.getElementById('modalContent').innerHTML = `
+    <h3>修改主调用 Key</h3>
+    <label>新的主调用 Key</label>
+    <input id="newPrimaryApiKey" type="password" placeholder="至少 4 位，建议使用随机长 Key" autocomplete="new-password">
+    <div class="hint">仅用于客户端调用 /v1/*，不能登录管理页面。</div>
+    <div class="actions">
+      <button class="btn btn-outline" onclick="showClientKeysModal()">取消</button>
+      <button class="btn btn-primary" onclick="savePrimaryApiKey()">保存</button>
+    </div>`;
+      document.getElementById('modal').classList.add('active');
+      setTimeout(() => document.getElementById('newPrimaryApiKey')?.focus(), 0);
+    }
+
+    async function savePrimaryApiKey() {
+      const nextKey = document.getElementById('newPrimaryApiKey').value.trim();
+      if (nextKey.length < 4) { toast('主调用 Key 至少 4 位', false); return; }
+      if (!isSafeHeaderValue(nextKey)) { toast('主调用 Key 包含非法字符', false); return; }
+      try {
+        const res = await api('/api/config/api-key', {
+          method: 'POST',
+          body: JSON.stringify({ api_key: nextKey })
+        });
+        if (!res.ok) { toast(res.error || '修改失败', false); return; }
+        toast('主调用 Key 已修改');
+        closeModal();
+        await load();
+      } catch (e) {
+        toast('修改失败: ' + e.message, false);
+      }
+    }
+
+    async function logoutAdmin() {
+      try {
+        await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+      } finally {
+        location.replace('/');
       }
     }
 
@@ -2418,15 +2448,7 @@
     }
 
     async function api(path, opts = {}) {
-      KEY = String(KEY || '').trim();
-      if (KEY && !isSafeHeaderValue(KEY)) {
-        localStorage.removeItem(KEY_STORAGE);
-        const err = new Error('管理 Key 包含非法字符，请重新输入');
-        err.status = 401;
-        throw err;
-      }
-      if (KEY) localStorage.setItem(KEY_STORAGE, KEY);
-      const res = await fetch(path, { headers: { 'Authorization': `Bearer ${KEY}`, 'Content-Type': 'application/json' }, ...opts });
+      const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const err = new Error(data.error?.message || data.error || `HTTP ${res.status}`);
@@ -2440,7 +2462,7 @@
       if (!confirm('备份会包含所有渠道 Key、管理 Key、调用 Key、网站按钮和用量统计，确定导出？')) return;
       try {
         const res = await fetch('/api/config/export', {
-          headers: { 'Authorization': `Bearer ${KEY}` },
+          credentials: 'same-origin',
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
@@ -2488,12 +2510,12 @@
             method: 'POST',
             body: JSON.stringify(data)
           });
-          if (importedConfig.api_key) {
-            KEY = String(importedConfig.api_key);
-            localStorage.setItem(KEY_STORAGE, KEY);
-            document.getElementById('apiKeyLabel').textContent = '已保存在本浏览器';
-          }
           toast(`备份已导入：${res.channels} 个渠道${res.statsRestored ? '（含用量统计）' : ''}`);
+          if (importedConfig.admin_key) {
+            alert('备份包含新的管理 Key，请重新登录。');
+            location.replace('/');
+            return;
+          }
           await load();
         } catch (e) {
           toast('导入失败: ' + e.message, false);
@@ -2509,6 +2531,10 @@
         websiteButtons = d.website_buttons || [];
         clientKeys = d.api_keys || [];
       } catch (e) {
+        if (e.status === 401) {
+          location.replace('/');
+          return;
+        }
         toast(`加载配置失败: ${e.message || '未知错误'}`, false);
         return;
       }
@@ -2850,7 +2876,7 @@
           <div class="hint">截止时间：${escapeHtml(expiresText)}</div>
         </div>
         <button class="btn btn-outline btn-sm" onclick="copyText(${jsArg(item.key)})">复制</button>
-        ${item.key_type === 'admin' ? '<span class="hint">管理 Key</span>' : `<button class="btn btn-outline btn-sm" onclick="editClientKey(${jsArg(item.key)})">编辑</button>
+        ${item.key_type === 'admin' ? '<span class="hint">主调用 Key</span><button class="btn btn-outline btn-sm" onclick="showPrimaryApiKeyModal()">修改</button>' : `<button class="btn btn-outline btn-sm" onclick="editClientKey(${jsArg(item.key)})">编辑</button>
         <button class="btn btn-danger btn-sm" onclick="deleteClientKey(${jsArg(item.key)})">删除</button>`}
       </div>
     </div>
@@ -4375,7 +4401,8 @@
       try {
         const resp = await fetch('/api/probe-models', {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ base_url: url, key, format, channelKey: editingKey || '' })
         });
         const d = await resp.json();
@@ -4727,7 +4754,8 @@
       try {
         const resp = await fetch('/api/test-channel', {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ channelKey: ckey })
         });
         const d = await resp.json();
@@ -4776,7 +4804,8 @@
       try {
         const resp = await fetch('/api/config/channel-keys/test', {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ channelKey: editingKey, key })
         });
         const d = await resp.json();

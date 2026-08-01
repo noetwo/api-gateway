@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { config, modelMap, stats } from './state.mjs';
 import { fingerprintKey, writeGatewayLog, getClientIp } from './logger.mjs';
 import {
@@ -5,6 +6,13 @@ import {
   normalizeClientKeyEntry,
   saveConfig,
 } from './config.mjs';
+
+const ADMIN_SESSION_COOKIE = 'api_gateway_admin_session';
+const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const ADMIN_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const ADMIN_LOGIN_MAX_FAILURES = 10;
+const adminSessions = new Map();
+const adminLoginFailures = new Map();
 
 function getClientKeyEntries() {
   return (Array.isArray(config.api_keys) ? config.api_keys : [])
@@ -40,7 +48,7 @@ function withClientKeyUsage(entry, type = 'generated') {
 function getClientKeyDashboardEntries() {
   const admin = withClientKeyUsage({
     key: config.api_key,
-    name: '主要 Key',
+    name: '主调用 Key',
     allowed_channels: [],
     allowed_models: [],
     quota_limit: 0,
@@ -145,8 +153,138 @@ function getBearerToken(req) {
   return '';
 }
 
+function secureKeyEqual(candidate = '', expected = '') {
+  const candidateBuffer = Buffer.from(String(candidate));
+  const expectedBuffer = Buffer.from(String(expected));
+  return candidateBuffer.length === expectedBuffer.length
+    && candidateBuffer.length > 0
+    && crypto.timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+function adminKeyDigest(key = '') {
+  return crypto.createHash('sha256').update(String(key)).digest('hex');
+}
+
+function getCookie(req, name) {
+  const raw = String(req.headers.cookie || '');
+  for (const part of raw.split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    if (part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return '';
+}
+
+function isSecureRequest(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return forwardedProto === 'https' || Boolean(req.socket.encrypted);
+}
+
+function buildAdminSessionCookie(req, token = '', maxAgeSeconds = 0) {
+  const parts = [
+    `${ADMIN_SESSION_COOKIE}=${token}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
+  ];
+  if (isSecureRequest(req)) parts.push('Secure');
+  return parts.join('; ');
+}
+
+function pruneAdminAuthState(now = Date.now()) {
+  for (const [token, session] of adminSessions) {
+    if (!session || session.expiresAt <= now) adminSessions.delete(token);
+  }
+  for (const [clientIp, entry] of adminLoginFailures) {
+    if (!entry || entry.windowStartedAt + ADMIN_LOGIN_WINDOW_MS <= now) adminLoginFailures.delete(clientIp);
+  }
+}
+
+function getValidAdminSession(req) {
+  const token = getCookie(req, ADMIN_SESSION_COOKIE);
+  if (!token) return null;
+  const session = adminSessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    adminSessions.delete(token);
+    return null;
+  }
+  const currentDigest = adminKeyDigest(String(config.admin_key || '').trim());
+  if (!secureKeyEqual(session.keyDigest, currentDigest)) {
+    adminSessions.delete(token);
+    return null;
+  }
+  return { token, session };
+}
+
+function isAdminRequestAuthenticated(req) {
+  const adminKey = String(config.admin_key || '').trim();
+  return secureKeyEqual(getBearerToken(req), adminKey) || Boolean(getValidAdminSession(req));
+}
+
+function handleAdminLogin(req, res, body = '') {
+  const now = Date.now();
+  pruneAdminAuthState(now);
+  const clientIp = getClientIp(req) || 'unknown';
+  const failure = adminLoginFailures.get(clientIp);
+  if (failure && failure.windowStartedAt + ADMIN_LOGIN_WINDOW_MS > now && failure.count >= ADMIN_LOGIN_MAX_FAILURES) {
+    const retryAfter = Math.max(1, Math.ceil((failure.windowStartedAt + ADMIN_LOGIN_WINDOW_MS - now) / 1000));
+    res.writeHead(429, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'Retry-After': String(retryAfter),
+    });
+    res.end(JSON.stringify({ error: { message: 'Too many login attempts. Try again later.', type: 'rate_limit_error' } }));
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(body || '{}');
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }));
+    return;
+  }
+
+  const suppliedKey = String(parsed.admin_key || '').trim();
+  const adminKey = String(config.admin_key || '').trim();
+  if (!secureKeyEqual(suppliedKey, adminKey)) {
+    const current = failure && failure.windowStartedAt + ADMIN_LOGIN_WINDOW_MS > now
+      ? failure
+      : { count: 0, windowStartedAt: now };
+    adminLoginFailures.set(clientIp, { ...current, count: current.count + 1 });
+    rejectAuth(req, res, 'Invalid management key');
+    return;
+  }
+
+  adminLoginFailures.delete(clientIp);
+  const token = crypto.randomBytes(32).toString('base64url');
+  adminSessions.set(token, {
+    expiresAt: now + ADMIN_SESSION_TTL_MS,
+    keyDigest: adminKeyDigest(adminKey),
+  });
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+    'Set-Cookie': buildAdminSessionCookie(req, token, ADMIN_SESSION_TTL_MS / 1000),
+  });
+  res.end(JSON.stringify({ ok: true }));
+}
+
+function handleAdminLogout(req, res) {
+  const token = getCookie(req, ADMIN_SESSION_COOKIE);
+  if (token) adminSessions.delete(token);
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+    'Set-Cookie': buildAdminSessionCookie(req, '', 0),
+  });
+  res.end(JSON.stringify({ ok: true }));
+}
+
 function rejectAuth(req, res, message = 'Invalid API key', type = 'auth_error') {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.writeHead(401, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({ error: { message, type } }));
     writeGatewayLog('request_complete', {
       requestId: res.getHeader('X-Request-Id') || '',
@@ -163,11 +301,12 @@ function rejectAuth(req, res, message = 'Invalid API key', type = 'auth_error') 
 }
 
 function adminAuth(req, res) {
-  // 管理 Key 校验已移除：管理面板由前置的 Nginx 通用登录保护，
-  // 且服务仅监听 127.0.0.1，不直接对外暴露。任何到达 /api/ 的请求
-  // 都视为管理员上下文。对外调用 Key（/v1/ 的 clientAuth）不受影响。
-  req.clientApiKey = config.api_key;
-  req.clientApiKeyFingerprint = fingerprintKey(config.api_key);
+  const adminKey = String(config.admin_key || '').trim();
+  if (!isAdminRequestAuthenticated(req)) {
+    return rejectAuth(req, res, 'Invalid management key');
+  }
+  req.clientApiKey = adminKey;
+  req.clientApiKeyFingerprint = fingerprintKey(adminKey);
   req.clientApiKeyType = 'admin';
   req.clientAllowedChannels = [];
   req.clientAllowedModels = [];
@@ -176,6 +315,9 @@ function adminAuth(req, res) {
 
 function clientAuth(req, res) {
   const token = getBearerToken(req);
+  if (secureKeyEqual(token, String(config.admin_key || '').trim())) {
+    return rejectAuth(req, res, 'Management key cannot access model APIs');
+  }
   if (token === config.api_key) {
     req.clientApiKey = token;
     req.clientApiKeyFingerprint = fingerprintKey(token);
@@ -217,6 +359,9 @@ export {
   consumeClientQuota,
   getBearerToken,
   rejectAuth,
+  isAdminRequestAuthenticated,
+  handleAdminLogin,
+  handleAdminLogout,
   adminAuth,
   clientAuth,
 };

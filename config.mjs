@@ -259,6 +259,7 @@ function normalizeImportedConfig(input) {
   const normalized = {
     ...nextConfig,
     port: Number(nextConfig.port) || config.port || 8300,
+    admin_key: String(nextConfig.admin_key || config.admin_key || '').trim(),
     api_key: String(nextConfig.api_key || config.api_key || '').trim(),
     api_keys: Array.isArray(nextConfig.api_keys)
       ? nextConfig.api_keys.map(normalizeClientKeyEntry).filter(Boolean)
@@ -270,7 +271,26 @@ function normalizeImportedConfig(input) {
     normalized.channels[key] = normalizeChannelForSave(channel);
   }
   if (normalized.api_key.length < 4) {
-    throw new Error('管理 Key 至少 4 位');
+    throw new Error('主调用 Key 至少 4 位');
+  }
+  if (!/^[\x21-\x7E]+$/.test(normalized.api_key)) {
+    throw new Error('主调用 Key 只能包含英文、数字和常见英文符号');
+  }
+  if (normalized.admin_key.length < 8) {
+    throw new Error('管理 Key 至少 8 位');
+  }
+  if (!/^[\x21-\x7E]+$/.test(normalized.admin_key)) {
+    throw new Error('管理 Key 只能包含英文、数字和常见英文符号');
+  }
+  if (normalized.admin_key === normalized.api_key) {
+    throw new Error('管理 Key 不能与主调用 Key 相同');
+  }
+  const clientKeySet = new Set(normalized.api_keys.map(entry => entry.key));
+  if (clientKeySet.has(normalized.admin_key)) {
+    throw new Error('管理 Key 不能与额外调用 Key 相同');
+  }
+  if (clientKeySet.has(normalized.api_key)) {
+    throw new Error('主调用 Key 不能与额外调用 Key 相同');
   }
   return normalized;
 }

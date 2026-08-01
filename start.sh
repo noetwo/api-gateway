@@ -10,6 +10,13 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+NODE_MAJOR="$(node -p "Number(process.versions.node.split('.')[0])")"
+if [ "${NODE_MAJOR}" -lt 22 ]; then
+  echo "Node.js 22 or newer is required (Node.js 24 LTS recommended)."
+  echo "Current version: $(node --version)"
+  exit 1
+fi
+
 if [ ! -f config.json ]; then
   cp config.example.json config.json
   echo "Created config.json from config.example.json."

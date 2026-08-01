@@ -903,12 +903,57 @@ async function handleConfigAPI(req, res, url, body) {
     return true;
   }
 
+  if (url === '/api/config/admin-key' && req.method === 'POST') {
+    const d = JSON.parse(body);
+    const nextKey = String(d.admin_key || '').trim();
+    if (nextKey.length < 8) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '管理 Key 至少 8 位' }));
+      return true;
+    }
+    if (!/^[\x21-\x7E]+$/.test(nextKey)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '管理 Key 只能包含英文、数字和常见英文符号' }));
+      return true;
+    }
+    if (nextKey === config.api_key) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '管理 Key 不能与主调用 Key 相同' }));
+      return true;
+    }
+    if (findClientKeyEntry(nextKey)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '管理 Key 不能与额外调用 Key 相同' }));
+      return true;
+    }
+    config.admin_key = nextKey;
+    saveConfig();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return true;
+  }
+
   if (url === '/api/config/api-key' && req.method === 'POST') {
     const d = JSON.parse(body);
     const nextKey = String(d.api_key || '').trim();
     if (nextKey.length < 4) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: '管理 Key 至少 4 位' }));
+      res.end(JSON.stringify({ ok: false, error: '主调用 Key 至少 4 位' }));
+      return true;
+    }
+    if (!/^[\x21-\x7E]+$/.test(nextKey)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '主调用 Key 只能包含英文、数字和常见英文符号' }));
+      return true;
+    }
+    if (nextKey === config.admin_key) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '主调用 Key 不能与管理 Key 相同' }));
+      return true;
+    }
+    if (findClientKeyEntry(nextKey)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '主调用 Key 不能与额外调用 Key 相同' }));
       return true;
     }
     config.api_key = nextKey;
@@ -958,7 +1003,11 @@ ${normalizedUrl}`;
     const quotaLimit = Math.max(0, Math.floor(Number(d.quota_limit) || 0));
     const expiresAt = normalizeExpiresAt(d.expires_at);
     const existingEntries = getClientKeyEntries();
-    const existing = new Set(existingEntries.map(entry => entry.key));
+    const existing = new Set([
+      ...existingEntries.map(entry => entry.key),
+      config.admin_key,
+      config.api_key,
+    ]);
     const created = [];
     while (created.length < count) {
       const key = `${prefix}-${crypto.randomBytes(18).toString('base64url')}`;
@@ -996,6 +1045,11 @@ ${normalizedUrl}`;
       return true;
     }
     if (key === config.api_key) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '调用 Key 不能和主调用 Key 相同' }));
+      return true;
+    }
+    if (key === config.admin_key) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: '调用 Key 不能和管理 Key 相同' }));
       return true;
